@@ -139,6 +139,7 @@ func (h *Handler) handlePurchases(ctx context.Context, chatID int64, msgID int, 
 	defer span.End()
 
 	dealID := strings.TrimPrefix(cb.Data, "purchases:")
+	h.sm.Get(cb.From.ID).dealID = dealID
 	h.showPurchases(ctx, chatID, msgID, dealID)
 }
 
