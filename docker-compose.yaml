@@ -1,3 +1,8 @@
+networks:
+  default: {}
+  monitoring-net:
+    external: true
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -25,6 +30,9 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - default
+      - monitoring-net
 
   telegram-bot:
     build:
@@ -37,6 +45,9 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - default
+      - monitoring-net
 
 volumes:
   postgres_data:
