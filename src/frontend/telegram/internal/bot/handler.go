@@ -497,6 +497,9 @@ func (h *Handler) showPaymentFromKeyboard(ctx context.Context, chatID int64, msg
 			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_from:"+p.Id),
 		))
 	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("← Назад", "back"),
+	))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, "Кто перевёл деньги?", &kb)
 }
@@ -514,8 +517,15 @@ func (h *Handler) showPaymentToKeyboard(ctx context.Context, chatID int64, msgID
 			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_to:"+p.Id),
 		))
 	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("← Назад", "back"),
+	))
 	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	sendOrEdit(ctx, h.api, chatID, msgID, "Кому перевёл?", &kb)
+	text := "Кому перевёл?"
+	if len(rows) == 1 {
+		text = "Нет других участников для выбора получателя."
+	}
+	sendOrEdit(ctx, h.api, chatID, msgID, text, &kb)
 }
 
 func (h *Handler) showSplitModeKeyboard(ctx context.Context, chatID int64, msgID int) {
