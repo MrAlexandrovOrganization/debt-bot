@@ -31,7 +31,7 @@ func (m *inMemoryStateManager) Get(userID int64) *userState {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.states[userID]; !ok {
-		m.states[userID] = &userState{participantNames: make(map[string]string)}
+		m.states[userID] = newUserState()
 	}
 	return m.states[userID]
 }
@@ -39,30 +39,49 @@ func (m *inMemoryStateManager) Get(userID int64) *userState {
 func (m *inMemoryStateManager) Reset(userID int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.states[userID] = &userState{participantNames: make(map[string]string)}
+	m.states[userID] = newUserState()
+}
+
+func newUserState() *userState {
+	return &userState{
+		participantNames: make(map[string]string),
+		purchaseAmounts:  make(map[string]int64),
+	}
 }
 
 const platform = "telegram"
 
 // FSM steps
 const (
-	stepIdle                 = ""
-	stepAwaitDealTitle       = "await_deal_title"
-	stepAwaitParticipantName = "await_participant_name"
-	stepAwaitPurchaseTitle   = "await_purchase_title"
-	stepAwaitPurchaseAmount  = "await_purchase_amount"
-	stepAwaitPurchasePayer   = "await_purchase_payer"
-	stepDealCovSelectPayer   = "deal_cov_select_payer"
-	stepDealCovSelectCovered = "deal_cov_select_covered"
+	stepIdle                    = ""
+	stepAwaitDealTitle          = "await_deal_title"
+	stepAwaitParticipantName    = "await_participant_name"
+	stepAwaitPurchaseTitle      = "await_purchase_title"
+	stepAwaitPurchaseAmount     = "await_purchase_amount"
+	stepAwaitPurchasePayer      = "await_purchase_payer"
+	stepAwaitPurchaseSplitMode  = "await_purchase_split_mode"
+	stepAwaitPurchasePayerShare = "await_purchase_payer_share"
+	stepAwaitAmountsEntry       = "await_amounts_entry"
+	stepDealCovSelectPayer      = "deal_cov_select_payer"
+	stepDealCovSelectCovered    = "deal_cov_select_covered"
+	stepAwaitPaymentFrom        = "await_payment_from"
+	stepAwaitPaymentTo          = "await_payment_to"
+	stepAwaitPaymentAmount      = "await_payment_amount"
 )
 
 type userState struct {
-	step              string
-	dealID            string
-	purchaseTitle     string
-	purchaseAmt       int64
-	purchasePayerID   string
-	pendingCovPayerID string
+	step                      string
+	dealID                    string
+	purchaseTitle             string
+	purchaseAmt               int64
+	purchasePayerID           string
+	purchaseSplitMode         string
+	purchasePayerShare        int64
+	purchaseAmounts           map[string]int64 // participant_id → amount
+	pendingAmountParticipants []string         // ordered list for amounts loop
+	pendingAmountIdx          int              // current participant index
+	pendingCovPayerID         string
+	pendingPaymentFromID      string
 	// cache: participant id → name
 	participantNames map[string]string
 }
@@ -201,6 +220,9 @@ func (h *Handler) showDealMenu(ctx context.Context, chatID int64, msgID int, dea
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("💰 Рассчитать", "calculate:"+dealID),
 			tgbotapi.NewInlineKeyboardButtonData(covLabel, "deal_coverages:"+dealID),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("💸 Платежи", "payments:"+dealID),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("← К сделкам", "my_deals"),
@@ -381,7 +403,7 @@ func (h *Handler) showPurchases(ctx context.Context, chatID int64, msgID int, de
 	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &fullKb)
 }
 
-func (h *Handler) showCalculation(ctx context.Context, chatID int64, msgID int, dealID string) {
+func (h *Handler) showCalculation(ctx context.Context, chatID int64, msgID int, dealID string, currentUserID string) {
 	ctx, span := tracer.Start(ctx, "showCalculation")
 	defer span.End()
 
@@ -395,20 +417,123 @@ func (h *Handler) showCalculation(ctx context.Context, chatID int64, msgID int, 
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID)),
 	)
 
+	var sb strings.Builder
+
 	if len(result.Debts) == 0 {
-		sendOrEdit(ctx, h.api, chatID, msgID, "✅ Все в расчёте, долгов нет!", &back)
+		sb.WriteString("✅ Все в расчёте, долгов нет!")
+	} else {
+		names := make(map[string]string)
+		sb.WriteString("Взаиморасчёты:\n\n")
+		for _, d := range result.Debts {
+			from := resolveUserName(ctx, h.client, d.FromUserId, names)
+			to := resolveUserName(ctx, h.client, d.ToUserId, names)
+			fmt.Fprintf(&sb, "• %s → %s: %s ₽\n", from, to, formatAmount(d.Amount))
+		}
+	}
+
+	// Show personal summary for the current user
+	if currentUserID != "" && result.Summaries != nil {
+		if s, ok := result.Summaries[currentUserID]; ok && s.TotalPaid > 0 {
+			sb.WriteString("\n💰 Ваш итог:\n")
+			fmt.Fprintf(&sb, "  Заплатили: %s ₽\n", formatAmount(s.TotalPaid))
+			fmt.Fprintf(&sb, "  Ваша доля: %s ₽\n", formatAmount(s.OwnShare))
+			fmt.Fprintf(&sb, "  Ожидаете от других: %s ₽\n", formatAmount(s.ExpectedFromOthers))
+			fmt.Fprintf(&sb, "  Уже получено: %s ₽\n", formatAmount(s.PaymentsReceived))
+			fmt.Fprintf(&sb, "  Ещё ждёте: %s ₽\n", formatAmount(s.StillAwaiting))
+		}
+	}
+
+	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &back)
+}
+
+func (h *Handler) showPayments(ctx context.Context, chatID int64, msgID int, dealID string) {
+	ctx, span := tracer.Start(ctx, "showPayments")
+	defer span.End()
+
+	payments, err := h.client.ListDealPayments(ctx, dealID)
+	if err != nil {
+		editText(ctx, h.api, chatID, msgID, "Ошибка при загрузке платежей.", nil)
 		return
 	}
 
-	names := make(map[string]string)
 	var sb strings.Builder
-	sb.WriteString("Взаиморасчёты:\n\n")
-	for _, d := range result.Debts {
-		from := resolveUserName(ctx, h.client, d.FromUserId, names)
-		to := resolveUserName(ctx, h.client, d.ToUserId, names)
-		fmt.Fprintf(&sb, "• %s → %s: %s ₽\n", from, to, formatAmount(d.Amount))
+	sb.WriteString("💸 Платежи:\n\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	names := make(map[string]string)
+
+	if len(payments) == 0 {
+		sb.WriteString("Платежей пока нет.")
+	} else {
+		for _, p := range payments {
+			from := resolveUserName(ctx, h.client, p.FromUserId, names)
+			to := resolveUserName(ctx, h.client, p.ToUserId, names)
+			fmt.Fprintf(&sb, "• %s → %s: %s ₽\n", from, to, formatAmount(p.Amount))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("❌ "+from+"→"+to, "del_payment:"+p.Id),
+			))
+		}
 	}
-	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &back)
+
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить платёж", "add_payment:"+dealID),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID),
+		),
+	)
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &kb)
+}
+
+func (h *Handler) showPaymentFromKeyboard(ctx context.Context, chatID int64, msgID int, participants []*pb.User) {
+	ctx, span := tracer.Start(ctx, "showPaymentFromKeyboard")
+	defer span.End()
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, p := range participants {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_from:"+p.Id),
+		))
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	sendOrEdit(ctx, h.api, chatID, msgID, "Кто перевёл деньги?", &kb)
+}
+
+func (h *Handler) showPaymentToKeyboard(ctx context.Context, chatID int64, msgID int, participants []*pb.User, excludeID string) {
+	ctx, span := tracer.Start(ctx, "showPaymentToKeyboard")
+	defer span.End()
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, p := range participants {
+		if p.Id == excludeID {
+			continue
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_to:"+p.Id),
+		))
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	sendOrEdit(ctx, h.api, chatID, msgID, "Кому перевёл?", &kb)
+}
+
+func (h *Handler) showSplitModeKeyboard(ctx context.Context, chatID int64, msgID int) {
+	ctx, span := tracer.Start(ctx, "showSplitModeKeyboard")
+	defer span.End()
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Поровну", "split_mode:all"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Поровну — указать мою долю", "split_mode:all_share"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("По суммам каждого", "split_mode:amounts"),
+		),
+	)
+	sendOrEdit(ctx, h.api, chatID, msgID, "Как разделить расходы?", &kb)
 }
 
 func (h *Handler) showPayerKeyboard(ctx context.Context, chatID int64, msgID int, participants []*pb.User) {

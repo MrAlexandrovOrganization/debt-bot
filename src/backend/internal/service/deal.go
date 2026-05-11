@@ -74,7 +74,7 @@ func (s *DealService) AddParticipant(ctx context.Context, dealID, userID string)
 	return s.deals.GetByID(ctx, dealID)
 }
 
-func (s *DealService) AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string) (*domain.Purchase, error) {
+func (s *DealService) AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string, payerShare int64, participantAmounts map[string]int64) (*domain.Purchase, error) {
 	ctx, span := tracer.Start(ctx, "DealService.AddPurchase")
 	defer span.End()
 	span.SetAttributes(
@@ -85,19 +85,30 @@ func (s *DealService) AddPurchase(ctx context.Context, dealID, title string, amo
 		attribute.String("purchase.paid_by", paidBy),
 	)
 
-	purchase, err := s.purchases.Create(ctx, dealID, title, amount, paidBy, splitMode)
+	purchase, err := s.purchases.Create(ctx, dealID, title, amount, paidBy, splitMode, payerShare)
 	if err != nil {
 		return nil, err
 	}
 	span.SetAttributes(attribute.String("purchase.id", purchase.ID))
 
-	if splitMode == domain.SplitModeCustom {
+	switch splitMode {
+	case domain.SplitModeCustom:
 		for _, uid := range participantIDs {
-			if err := s.purchases.AddParticipant(ctx, purchase.ID, uid); err != nil {
+			if err := s.purchases.AddParticipant(ctx, purchase.ID, uid, 0); err != nil {
 				return nil, fmt.Errorf("add purchase participant: %w", err)
 			}
 		}
 		purchase.ParticipantIDs = participantIDs
+	case domain.SplitModeAmounts:
+		for uid, amt := range participantAmounts {
+			if err := s.purchases.AddParticipant(ctx, purchase.ID, uid, amt); err != nil {
+				return nil, fmt.Errorf("add purchase participant: %w", err)
+			}
+		}
+		purchase.ParticipantAmounts = participantAmounts
+		for uid := range participantAmounts {
+			purchase.ParticipantIDs = append(purchase.ParticipantIDs, uid)
+		}
 	}
 
 	return purchase, nil

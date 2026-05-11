@@ -29,6 +29,11 @@ service DebtService {
   rpc ListDealPurchases(ListDealPurchasesRequest) returns (ListDealPurchasesResponse);
   rpc RemovePurchase(RemovePurchaseRequest) returns (RemovePurchaseResponse);
 
+  // Payments (settlements)
+  rpc AddPayment(AddPaymentRequest) returns (AddPaymentResponse);
+  rpc ListDealPayments(ListDealPaymentsRequest) returns (ListDealPaymentsResponse);
+  rpc RemovePayment(RemovePaymentRequest) returns (RemovePaymentResponse);
+
   // Debt calculation
   rpc CalculateDebts(CalculateDebtsRequest) returns (CalculateDebtsResponse);
 }
@@ -56,8 +61,10 @@ message Purchase {
   string title = 3;
   int64 amount = 4; // in kopecks
   string paid_by = 5;
-  string split_mode = 6; // "all" | "custom"
+  string split_mode = 6; // "all" | "custom" | "amounts"
   repeated string participant_ids = 7;
+  int64 payer_share = 8; // payer's own share in kopecks (optional)
+  map<string, int64> participant_amounts = 9; // participant_id -> amount (for split_mode="amounts")
 }
 
 message Coverage {
@@ -69,6 +76,23 @@ message DebtItem {
   string from_user_id = 1;
   string to_user_id = 2;
   int64 amount = 3; // in kopecks
+}
+
+message Payment {
+  string id = 1;
+  string deal_id = 2;
+  string from_user_id = 3;
+  string to_user_id = 4;
+  int64 amount = 5;
+  string created_at = 6;
+}
+
+message PaymentSummary {
+  int64 total_paid = 1;
+  int64 own_share = 2;
+  int64 expected_from_others = 3;
+  int64 payments_received = 4;
+  int64 still_awaiting = 5;
 }
 
 // --- ResolveOrCreateUser ---
@@ -210,8 +234,10 @@ message AddPurchaseRequest {
   string title = 2;
   int64 amount = 3; // in kopecks
   string paid_by = 4;
-  string split_mode = 5; // "all" | "custom"
+  string split_mode = 5; // "all" | "custom" | "amounts"
   repeated string participant_ids = 6; // used when split_mode="custom"
+  int64 payer_share = 7; // payer's own share in kopecks (optional)
+  map<string, int64> participant_amounts = 8; // participant_id -> amount (for split_mode="amounts")
 }
 
 message AddPurchaseResponse {
@@ -228,6 +254,37 @@ message ListDealPurchasesResponse {
   repeated Purchase purchases = 1;
 }
 
+// --- AddPayment ---
+
+message AddPaymentRequest {
+  string deal_id = 1;
+  string from_user_id = 2;
+  string to_user_id = 3;
+  int64 amount = 4;
+}
+
+message AddPaymentResponse {
+  Payment payment = 1;
+}
+
+// --- ListDealPayments ---
+
+message ListDealPaymentsRequest {
+  string deal_id = 1;
+}
+
+message ListDealPaymentsResponse {
+  repeated Payment payments = 1;
+}
+
+// --- RemovePayment ---
+
+message RemovePaymentRequest {
+  string payment_id = 1;
+}
+
+message RemovePaymentResponse {}
+
 // --- CalculateDebts ---
 
 message CalculateDebtsRequest {
@@ -237,4 +294,5 @@ message CalculateDebtsRequest {
 message CalculateDebtsResponse {
   repeated DebtItem debts = 1;
   map<string, int64> balances = 2; // user_id -> balance in kopecks
+  map<string, PaymentSummary> summaries = 3; // user_id -> payment summary
 }

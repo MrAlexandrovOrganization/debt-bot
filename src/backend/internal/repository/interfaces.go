@@ -29,9 +29,15 @@ type DealRepository interface {
 }
 
 type PurchaseRepository interface {
-	Create(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string) (*domain.Purchase, error)
+	Create(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, payerShare int64) (*domain.Purchase, error)
 	ListByDealID(ctx context.Context, dealID string) ([]*domain.Purchase, error)
 	Delete(ctx context.Context, purchaseID string) error
-	AddParticipant(ctx context.Context, purchaseID, userID string) error
+	AddParticipant(ctx context.Context, purchaseID, userID string, amount int64) error
 	GetParticipants(ctx context.Context, purchaseID string) ([]string, error)
+}
+
+type PaymentRepository interface {
+	Create(ctx context.Context, dealID, fromUserID, toUserID string, amount int64) (*domain.Payment, error)
+	ListByDealID(ctx context.Context, dealID string) ([]*domain.Payment, error)
+	Delete(ctx context.Context, paymentID string) error
 }

@@ -59,12 +59,14 @@ func main() {
 	userRepo := postgres.NewUserRepository(db)
 	dealRepo := postgres.NewDealRepository(db)
 	purchaseRepo := postgres.NewPurchaseRepository(db)
+	paymentRepo := postgres.NewPaymentRepository(db)
 
 	userSvc := service.NewUserService(userRepo)
 	dealSvc := service.NewDealService(dealRepo, purchaseRepo)
-	debtSvc := service.NewDebtService(dealRepo, purchaseRepo)
+	debtSvc := service.NewDebtService(dealRepo, purchaseRepo, paymentRepo)
+	paymentSvc := service.NewPaymentService(paymentRepo)
 
-	handler := grpchandler.New(userSvc, dealSvc, debtSvc)
+	handler := grpchandler.New(userSvc, dealSvc, debtSvc, paymentSvc)
 
 	srv := grpc.NewServer(
 		grpc.StatsHandler(otelgrpc.NewServerHandler()),

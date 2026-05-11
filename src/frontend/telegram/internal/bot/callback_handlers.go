@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	pb "github.com/mralexandrov/debt-bot/frontend/telegram/gen/debt/v1"
 )
 
 // --- Callback handler (button presses) ---
@@ -53,7 +54,13 @@ func (h *Handler) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery
 		{"deal_cov_remove:", func() { h.handleDealCoverageRemove(ctx, tgID, chatID, msgID, cb) }},
 		{"del_participant:", func() { h.handleDeleteParticipant(ctx, tgID, chatID, msgID, cb) }},
 		{"del_purchase:", func() { h.handleDeletePurchase(ctx, tgID, chatID, msgID, cb) }},
-		{"payer:", func() { h.handleCreatePurchase(ctx, tgID, chatID, msgID, cb) }},
+		{"payer:", func() { h.handlePayerSelected(ctx, tgID, chatID, msgID, cb) }},
+		{"split_mode:", func() { h.handleSplitModeSelected(ctx, tgID, chatID, msgID, cb) }},
+		{"payments:", func() { h.handlePayments(ctx, tgID, chatID, msgID, cb) }},
+		{"add_payment:", func() { h.handleAddPayment(ctx, tgID, chatID, msgID, cb) }},
+		{"payment_from:", func() { h.handlePaymentFrom(ctx, tgID, chatID, msgID, cb) }},
+		{"payment_to:", func() { h.handlePaymentTo(ctx, tgID, chatID, msgID, cb) }},
+		{"del_payment:", func() { h.handleDeletePayment(ctx, tgID, chatID, msgID, cb) }},
 	}
 
 	for _, ph := range prefixHandlers {
@@ -148,7 +155,12 @@ func (h *Handler) handleCalculate(ctx context.Context, chatID int64, msgID int, 
 	defer span.End()
 
 	dealID := strings.TrimPrefix(cb.Data, "calculate:")
-	h.showCalculation(ctx, chatID, msgID, dealID)
+	user := h.resolveUser(ctx, cb.From)
+	var userID string
+	if user != nil {
+		userID = user.Id
+	}
+	h.showCalculation(ctx, chatID, msgID, dealID, userID)
 }
 
 // Deal-level coverages management screen
@@ -256,9 +268,9 @@ func (h *Handler) handleDealCoverageRemove(ctx context.Context, tgID, chatID int
 	h.showDealCoverageMenu(ctx, chatID, msgID, st.dealID)
 }
 
-// Payer selected → create purchase immediately
-func (h *Handler) handleCreatePurchase(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
-	ctx, span := tracer.Start(ctx, "handleCreatePurchase")
+// Payer selected → show split mode keyboard
+func (h *Handler) handlePayerSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handlePayerSelected")
 	defer span.End()
 
 	payerID := strings.TrimPrefix(cb.Data, "payer:")
@@ -267,16 +279,150 @@ func (h *Handler) handleCreatePurchase(ctx context.Context, tgID, chatID int64, 
 		editText(ctx, h.api, chatID, msgID, "Сессия устарела. Начните заново.", nil)
 		return
 	}
-	_, err := h.client.AddPurchase(ctx, st.dealID, st.purchaseTitle, st.purchaseAmt, payerID, "all", nil)
-	if err != nil {
-		editText(ctx, h.api, chatID, msgID, "Ошибка при добавлении покупки.", nil)
+	st.purchasePayerID = payerID
+	st.step = stepAwaitPurchaseSplitMode
+	h.showSplitModeKeyboard(ctx, chatID, msgID)
+}
+
+// Split mode selected
+func (h *Handler) handleSplitModeSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handleSplitModeSelected")
+	defer span.End()
+
+	mode := strings.TrimPrefix(cb.Data, "split_mode:")
+	st := h.sm.Get(tgID)
+	if st.step != stepAwaitPurchaseSplitMode {
+		editText(ctx, h.api, chatID, msgID, "Сессия устарела. Начните заново.", nil)
 		return
 	}
-	dealID := st.dealID
-	title := st.purchaseTitle
-	h.sm.Reset(tgID)
-	editText(ctx, h.api, chatID, msgID, fmt.Sprintf("✅ Покупка «%s» добавлена!", title), nil)
-	h.showPurchases(ctx, chatID, 0, dealID)
+
+	switch mode {
+	case "all":
+		_, err := h.client.AddPurchase(ctx, st.dealID, st.purchaseTitle, st.purchaseAmt, st.purchasePayerID, "all", nil, 0, nil)
+		if err != nil {
+			editText(ctx, h.api, chatID, msgID, "Ошибка при добавлении покупки.", nil)
+			return
+		}
+		dealID := st.dealID
+		title := st.purchaseTitle
+		h.sm.Reset(tgID)
+		editText(ctx, h.api, chatID, msgID, fmt.Sprintf("✅ Покупка «%s» добавлена!", title), nil)
+		h.showPurchases(ctx, chatID, 0, dealID)
+
+	case "all_share":
+		st.step = stepAwaitPurchasePayerShare
+		kb := backKeyboard()
+		editText(ctx, h.api, chatID, msgID, "Введите вашу долю в рублях:", &kb)
+
+	case "amounts":
+		// Start collecting amounts from each participant
+		deal, err := h.client.GetDeal(ctx, st.dealID)
+		if err != nil {
+			editText(ctx, h.api, chatID, msgID, "Ошибка при загрузке сделки.", nil)
+			return
+		}
+		participants, err := fetchUsers(ctx, h.client, deal.ParticipantIds)
+		if err != nil || len(participants) == 0 {
+			editText(ctx, h.api, chatID, msgID, "Нет участников в сделке.", nil)
+			return
+		}
+		for _, p := range participants {
+			st.participantNames[p.Id] = p.Name
+			st.pendingAmountParticipants = append(st.pendingAmountParticipants, p.Id)
+		}
+		st.purchaseAmounts = make(map[string]int64)
+		st.pendingAmountIdx = 0
+		st.step = stepAwaitAmountsEntry
+		firstID := st.pendingAmountParticipants[0]
+		firstName := st.participantNames[firstID]
+		kb := backKeyboard()
+		editText(ctx, h.api, chatID, msgID, fmt.Sprintf("Сумма для %s (₽):", firstName), &kb)
+	}
+}
+
+// Payments screen
+func (h *Handler) handlePayments(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handlePayments")
+	defer span.End()
+
+	dealID := strings.TrimPrefix(cb.Data, "payments:")
+	h.sm.Get(tgID).dealID = dealID
+	h.showPayments(ctx, chatID, msgID, dealID)
+}
+
+// Start adding a payment: show "from" selector
+func (h *Handler) handleAddPayment(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handleAddPayment")
+	defer span.End()
+
+	dealID := strings.TrimPrefix(cb.Data, "add_payment:")
+	st := h.sm.Get(tgID)
+	st.dealID = dealID
+
+	deal, err := h.client.GetDeal(ctx, dealID)
+	if err != nil {
+		editText(ctx, h.api, chatID, msgID, "Ошибка при загрузке сделки.", nil)
+		return
+	}
+	participants, err := fetchUsers(ctx, h.client, deal.ParticipantIds)
+	if err != nil {
+		editText(ctx, h.api, chatID, msgID, "Ошибка при загрузке участников.", nil)
+		return
+	}
+	for _, p := range participants {
+		st.participantNames[p.Id] = p.Name
+	}
+	st.step = stepAwaitPaymentFrom
+	h.showPaymentFromKeyboard(ctx, chatID, msgID, participants)
+}
+
+// Payment "from" selected
+func (h *Handler) handlePaymentFrom(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handlePaymentFrom")
+	defer span.End()
+
+	fromID := strings.TrimPrefix(cb.Data, "payment_from:")
+	st := h.sm.Get(tgID)
+	st.pendingPaymentFromID = fromID
+	st.step = stepAwaitPaymentTo
+
+	// Build participants list from cached names, excluding fromID
+	var participants []*pb.User
+	for id, name := range st.participantNames {
+		participants = append(participants, &pb.User{Id: id, Name: name})
+	}
+	h.showPaymentToKeyboard(ctx, chatID, msgID, participants, fromID)
+}
+
+// Payment "to" selected
+func (h *Handler) handlePaymentTo(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handlePaymentTo")
+	defer span.End()
+
+	toID := strings.TrimPrefix(cb.Data, "payment_to:")
+	st := h.sm.Get(tgID)
+	st.purchasePayerID = toID // reuse field to store "to" user
+	st.step = stepAwaitPaymentAmount
+	kb := backKeyboard()
+	editText(ctx, h.api, chatID, msgID, "Введите сумму платежа (₽):", &kb)
+}
+
+// Delete payment
+func (h *Handler) handleDeletePayment(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "handleDeletePayment")
+	defer span.End()
+
+	paymentID := strings.TrimPrefix(cb.Data, "del_payment:")
+	st := h.sm.Get(tgID)
+	if st.dealID == "" {
+		editText(ctx, h.api, chatID, msgID, "Сессия устарела. Начните заново.", nil)
+		return
+	}
+	if err := h.client.RemovePayment(ctx, paymentID); err != nil {
+		editText(ctx, h.api, chatID, msgID, "Ошибка при удалении платежа.", nil)
+		return
+	}
+	h.showPayments(ctx, chatID, msgID, st.dealID)
 }
 
 func (h *Handler) handleDeleteParticipant(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
@@ -323,7 +469,9 @@ func (h *Handler) handleBack(ctx context.Context, tgID, chatID int64, msgID int)
 	switch st.step {
 	case stepAwaitDealTitle:
 		h.navigateToMainMenu(ctx, tgID, chatID, msgID)
-	case stepAwaitParticipantName, stepAwaitPurchaseTitle, stepAwaitPurchaseAmount, stepAwaitPurchasePayer:
+	case stepAwaitParticipantName, stepAwaitPurchaseTitle, stepAwaitPurchaseAmount,
+		stepAwaitPurchasePayer, stepAwaitPurchaseSplitMode, stepAwaitPurchasePayerShare,
+		stepAwaitAmountsEntry, stepAwaitPaymentFrom, stepAwaitPaymentTo, stepAwaitPaymentAmount:
 		h.navigateToDeal(ctx, tgID, chatID, msgID, dealID)
 	default:
 		h.navigateToMainMenu(ctx, tgID, chatID, msgID)

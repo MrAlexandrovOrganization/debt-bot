@@ -1,0 +1,22 @@
+version: v1
+plugins:
+  - plugin: go
+    out: src/backend/gen
+    opt:
+      - paths=source_relative
+  - plugin: go-grpc
+    out: src/backend/gen
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false
+  - plugin: go
+    out: src/frontend/telegram/gen
+    opt:
+      - paths=source_relative
+      - Mdebt/v1/debt.proto=github.com/mrralexandrov/debt-bot/frontend/telegram/gen/debt/v1;debtv1
+  - plugin: go-grpc
+    out: src/frontend/telegram/gen
+    opt:
+      - paths=source_relative
+      - Mdebt/v1/debt.proto=github.com/mrralexandrov/debt-bot/frontend/telegram/gen/debt/v1;debtv1
+      - require_unimplemented_servers=false

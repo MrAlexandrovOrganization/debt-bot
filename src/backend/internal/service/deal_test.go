@@ -92,8 +92,8 @@ func newFakePurchaseRepo() *fakePurchaseRepo {
 	return &fakePurchaseRepo{purchases: make(map[string][]*domain.Purchase)}
 }
 
-func (r *fakePurchaseRepo) Create(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string) (*domain.Purchase, error) {
-	p := &domain.Purchase{ID: "p-" + title, DealID: dealID, Title: title, Amount: amount, PaidBy: paidBy, SplitMode: splitMode}
+func (r *fakePurchaseRepo) Create(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, payerShare int64) (*domain.Purchase, error) {
+	p := &domain.Purchase{ID: "p-" + title, DealID: dealID, Title: title, Amount: amount, PaidBy: paidBy, SplitMode: splitMode, PayerShare: payerShare}
 	r.purchases[dealID] = append(r.purchases[dealID], p)
 	return p, nil
 }
@@ -114,12 +114,30 @@ func (r *fakePurchaseRepo) Delete(ctx context.Context, purchaseID string) error 
 	return nil
 }
 
-func (r *fakePurchaseRepo) AddParticipant(ctx context.Context, purchaseID, userID string) error {
+func (r *fakePurchaseRepo) AddParticipant(ctx context.Context, purchaseID, userID string, amount int64) error {
 	return nil
 }
 
 func (r *fakePurchaseRepo) GetParticipants(ctx context.Context, purchaseID string) ([]string, error) {
 	return nil, nil
+}
+
+type fakePaymentRepo struct {
+	payments []*domain.Payment
+}
+
+func (r *fakePaymentRepo) Create(ctx context.Context, dealID, fromUserID, toUserID string, amount int64) (*domain.Payment, error) {
+	p := &domain.Payment{ID: "pay-1", DealID: dealID, FromUserID: fromUserID, ToUserID: toUserID, Amount: amount}
+	r.payments = append(r.payments, p)
+	return p, nil
+}
+
+func (r *fakePaymentRepo) ListByDealID(ctx context.Context, dealID string) ([]*domain.Payment, error) {
+	return r.payments, nil
+}
+
+func (r *fakePaymentRepo) Delete(ctx context.Context, paymentID string) error {
+	return nil
 }
 
 // --- DealService.Create tests ---
@@ -230,7 +248,7 @@ func TestAddParticipant_AddsParticipant(t *testing.T) {
 func TestAddPurchase_SplitModeAll(t *testing.T) {
 	svc := NewDealService(newFakeDealRepo(), newFakePurchaseRepo())
 
-	p, err := svc.AddPurchase(context.Background(), "deal-1", "Dinner", 3000, "alice", domain.SplitModeAll, nil)
+	p, err := svc.AddPurchase(context.Background(), "deal-1", "Dinner", 3000, "alice", domain.SplitModeAll, nil, 0, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -246,7 +264,7 @@ func TestAddPurchase_SplitModeCustom(t *testing.T) {
 	svc := NewDealService(newFakeDealRepo(), newFakePurchaseRepo())
 
 	participants := []string{"alice", "bob"}
-	p, err := svc.AddPurchase(context.Background(), "deal-1", "Taxi", 600, "alice", domain.SplitModeCustom, participants)
+	p, err := svc.AddPurchase(context.Background(), "deal-1", "Taxi", 600, "alice", domain.SplitModeCustom, participants, 0, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -344,7 +362,7 @@ func TestDebtService_Calculate_SimpleCase(t *testing.T) {
 		{ID: "p-1", DealID: "deal-1", Title: "Lunch", Amount: 200, PaidBy: "alice", SplitMode: domain.SplitModeAll},
 	}
 
-	svc := NewDebtService(dealRepo, purchaseRepo)
+	svc := NewDebtService(dealRepo, purchaseRepo, &fakePaymentRepo{})
 	result, err := svc.Calculate(context.Background(), "deal-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

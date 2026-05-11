@@ -2,11 +2,11 @@ package grpchandler
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	pb "github.com/mralexandrov/debt-bot/backend/gen/debt/v1"
 	"github.com/mralexandrov/debt-bot/backend/internal/domain"
-	"errors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -27,7 +27,7 @@ type DealService interface {
 	AddParticipant(ctx context.Context, dealID, userID string) (*domain.Deal, error)
 	SetCoverage(ctx context.Context, dealID, payerID, coveredID string) (*domain.Deal, error)
 	RemoveCoverage(ctx context.Context, dealID, coveredID string) (*domain.Deal, error)
-	AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string) (*domain.Purchase, error)
+	AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string, payerShare int64, participantAmounts map[string]int64) (*domain.Purchase, error)
 	ListPurchases(ctx context.Context, dealID string) ([]*domain.Purchase, error)
 	RemoveParticipant(ctx context.Context, dealID, userID string) (*domain.Deal, error)
 	RemovePurchase(ctx context.Context, dealID, purchaseID string) (*domain.Deal, error)
@@ -38,15 +38,23 @@ type DebtService interface {
 	Calculate(ctx context.Context, dealID string) (*domain.CalculationResult, error)
 }
 
-type Handler struct {
-	pb.UnimplementedDebtServiceServer
-	users UserService
-	deals DealService
-	debts DebtService
+// PaymentService describes payment operations required by this handler.
+type PaymentService interface {
+	Add(ctx context.Context, dealID, fromUserID, toUserID string, amount int64) (*domain.Payment, error)
+	ListByDealID(ctx context.Context, dealID string) ([]*domain.Payment, error)
+	Delete(ctx context.Context, paymentID string) error
 }
 
-func New(users UserService, deals DealService, debts DebtService) *Handler {
-	return &Handler{users: users, deals: deals, debts: debts}
+type Handler struct {
+	pb.UnimplementedDebtServiceServer
+	users    UserService
+	deals    DealService
+	debts    DebtService
+	payments PaymentService
+}
+
+func New(users UserService, deals DealService, debts DebtService, payments PaymentService) *Handler {
+	return &Handler{users: users, deals: deals, debts: debts, payments: payments}
 }
 
 // --- User ---
@@ -143,7 +151,7 @@ func (h *Handler) RemoveDealCoverage(ctx context.Context, req *pb.RemoveDealCove
 // --- Purchase ---
 
 func (h *Handler) AddPurchase(ctx context.Context, req *pb.AddPurchaseRequest) (*pb.AddPurchaseResponse, error) {
-	purchase, err := h.deals.AddPurchase(ctx, req.DealId, req.Title, req.Amount, req.PaidBy, req.SplitMode, req.ParticipantIds)
+	purchase, err := h.deals.AddPurchase(ctx, req.DealId, req.Title, req.Amount, req.PaidBy, req.SplitMode, req.ParticipantIds, req.PayerShare, req.ParticipantAmounts)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "add purchase: %v", err)
 	}
@@ -187,6 +195,35 @@ func (h *Handler) RemovePurchase(ctx context.Context, req *pb.RemovePurchaseRequ
 	return &pb.RemovePurchaseResponse{Deal: domainDealToProto(deal)}, nil
 }
 
+// --- Payment ---
+
+func (h *Handler) AddPayment(ctx context.Context, req *pb.AddPaymentRequest) (*pb.AddPaymentResponse, error) {
+	payment, err := h.payments.Add(ctx, req.DealId, req.FromUserId, req.ToUserId, req.Amount)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "add payment: %v", err)
+	}
+	return &pb.AddPaymentResponse{Payment: domainPaymentToProto(payment)}, nil
+}
+
+func (h *Handler) ListDealPayments(ctx context.Context, req *pb.ListDealPaymentsRequest) (*pb.ListDealPaymentsResponse, error) {
+	payments, err := h.payments.ListByDealID(ctx, req.DealId)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list payments: %v", err)
+	}
+	var pbPayments []*pb.Payment
+	for _, p := range payments {
+		pbPayments = append(pbPayments, domainPaymentToProto(p))
+	}
+	return &pb.ListDealPaymentsResponse{Payments: pbPayments}, nil
+}
+
+func (h *Handler) RemovePayment(ctx context.Context, req *pb.RemovePaymentRequest) (*pb.RemovePaymentResponse, error) {
+	if err := h.payments.Delete(ctx, req.PaymentId); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove payment: %v", err)
+	}
+	return &pb.RemovePaymentResponse{}, nil
+}
+
 // --- Debt ---
 
 func (h *Handler) CalculateDebts(ctx context.Context, req *pb.CalculateDebtsRequest) (*pb.CalculateDebtsResponse, error) {
@@ -204,9 +241,21 @@ func (h *Handler) CalculateDebts(ctx context.Context, req *pb.CalculateDebtsRequ
 		})
 	}
 
+	pbSummaries := make(map[string]*pb.PaymentSummary)
+	for uid, s := range result.Summaries {
+		pbSummaries[uid] = &pb.PaymentSummary{
+			TotalPaid:          s.TotalPaid,
+			OwnShare:           s.OwnShare,
+			ExpectedFromOthers: s.ExpectedFromOthers,
+			PaymentsReceived:   s.PaymentsReceived,
+			StillAwaiting:      s.StillAwaiting,
+		}
+	}
+
 	return &pb.CalculateDebtsResponse{
-		Debts:    pbDebts,
-		Balances: result.Balances,
+		Debts:     pbDebts,
+		Balances:  result.Balances,
+		Summaries: pbSummaries,
 	}, nil
 }
 
@@ -237,12 +286,25 @@ func domainDealToProto(d *domain.Deal) *pb.Deal {
 
 func domainPurchaseToProto(p *domain.Purchase) *pb.Purchase {
 	return &pb.Purchase{
-		Id:             p.ID,
-		DealId:         p.DealID,
-		Title:          p.Title,
-		Amount:         p.Amount,
-		PaidBy:         p.PaidBy,
-		SplitMode:      p.SplitMode,
-		ParticipantIds: p.ParticipantIDs,
+		Id:                 p.ID,
+		DealId:             p.DealID,
+		Title:              p.Title,
+		Amount:             p.Amount,
+		PaidBy:             p.PaidBy,
+		SplitMode:          p.SplitMode,
+		ParticipantIds:     p.ParticipantIDs,
+		PayerShare:         p.PayerShare,
+		ParticipantAmounts: p.ParticipantAmounts,
+	}
+}
+
+func domainPaymentToProto(p *domain.Payment) *pb.Payment {
+	return &pb.Payment{
+		Id:         p.ID,
+		DealId:     p.DealID,
+		FromUserId: p.FromUserID,
+		ToUserId:   p.ToUserID,
+		Amount:     p.Amount,
+		CreatedAt:  p.CreatedAt.Format(time.RFC3339),
 	}
 }

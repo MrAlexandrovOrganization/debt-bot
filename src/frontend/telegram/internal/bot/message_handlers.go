@@ -109,7 +109,79 @@ func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	case stepAwaitPurchasePayer:
 		send(ctx, h.api, msg.Chat.ID, "Выберите плательщика из кнопок выше.", nil)
 
+	case stepAwaitPurchaseSplitMode:
+		send(ctx, h.api, msg.Chat.ID, "Выберите способ разделения из кнопок выше.", nil)
+
+	case stepAwaitPurchasePayerShare:
+		amt, err := parseAmount(text)
+		if err != nil || amt <= 0 {
+			send(ctx, h.api, msg.Chat.ID, "Неверный формат. Введите сумму (например: 150 или 99.50):", nil)
+			return
+		}
+		st.purchasePayerShare = amt
+		_, err = h.client.AddPurchase(ctx, st.dealID, st.purchaseTitle, st.purchaseAmt, st.purchasePayerID, "all", nil, amt, nil)
+		if err != nil {
+			send(ctx, h.api, msg.Chat.ID, "Ошибка при добавлении покупки.", nil)
+			return
+		}
+		dealID := st.dealID
+		title := st.purchaseTitle
+		h.sm.Reset(tgID)
+		send(ctx, h.api, msg.Chat.ID, fmt.Sprintf("✅ Покупка «%s» добавлена!", title), nil)
+		h.showPurchases(ctx, msg.Chat.ID, 0, dealID)
+
+	case stepAwaitAmountsEntry:
+		amt, err := parseAmount(text)
+		if err != nil || amt < 0 {
+			send(ctx, h.api, msg.Chat.ID, "Неверный формат. Введите сумму (например: 150 или 99.50):", nil)
+			return
+		}
+		participantID := st.pendingAmountParticipants[st.pendingAmountIdx]
+		st.purchaseAmounts[participantID] = amt
+		st.pendingAmountIdx++
+
+		if st.pendingAmountIdx < len(st.pendingAmountParticipants) {
+			nextID := st.pendingAmountParticipants[st.pendingAmountIdx]
+			nextName := st.participantNames[nextID]
+			kb := backKeyboard()
+			send(ctx, h.api, msg.Chat.ID, fmt.Sprintf("Сумма для %s (₽):", nextName), &kb)
+			return
+		}
+
+		// All amounts collected — create purchase
+		_, err = h.client.AddPurchase(ctx, st.dealID, st.purchaseTitle, st.purchaseAmt, st.purchasePayerID, "amounts", nil, 0, st.purchaseAmounts)
+		if err != nil {
+			send(ctx, h.api, msg.Chat.ID, "Ошибка при добавлении покупки.", nil)
+			return
+		}
+		dealID := st.dealID
+		title := st.purchaseTitle
+		h.sm.Reset(tgID)
+		send(ctx, h.api, msg.Chat.ID, fmt.Sprintf("✅ Покупка «%s» добавлена!", title), nil)
+		h.showPurchases(ctx, msg.Chat.ID, 0, dealID)
+
+	case stepAwaitPaymentAmount:
+		amt, err := parseAmount(text)
+		if err != nil || amt <= 0 {
+			send(ctx, h.api, msg.Chat.ID, "Неверный формат. Введите сумму (например: 150 или 99.50):", nil)
+			return
+		}
+		dealID := st.dealID
+		fromID := st.pendingPaymentFromID
+		toID := st.purchasePayerID
+		if _, err := h.client.AddPayment(ctx, dealID, fromID, toID, amt); err != nil {
+			send(ctx, h.api, msg.Chat.ID, "Ошибка при добавлении платежа.", nil)
+			return
+		}
+		h.sm.Reset(tgID)
+		h.sm.Get(tgID).dealID = dealID
+		send(ctx, h.api, msg.Chat.ID, "✅ Платёж записан!", nil)
+		h.showPayments(ctx, msg.Chat.ID, 0, dealID)
+
 	case stepDealCovSelectPayer, stepDealCovSelectCovered:
 		send(ctx, h.api, msg.Chat.ID, "Используйте кнопки для навигации.", nil)
+
+	case stepAwaitPaymentFrom, stepAwaitPaymentTo:
+		send(ctx, h.api, msg.Chat.ID, "Используйте кнопки для выбора участника.", nil)
 	}
 }

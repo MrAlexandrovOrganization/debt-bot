@@ -22,11 +22,14 @@ type DebtClient interface {
 	AddDealParticipant(ctx context.Context, dealID, userID string) (*pb.Deal, error)
 	SetDealCoverage(ctx context.Context, dealID, payerID, coveredID string) (*pb.Deal, error)
 	RemoveDealCoverage(ctx context.Context, dealID, coveredID string) (*pb.Deal, error)
-	AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string) (*pb.Purchase, error)
+	AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string, payerShare int64, participantAmounts map[string]int64) (*pb.Purchase, error)
 	ListDealPurchases(ctx context.Context, dealID string) ([]*pb.Purchase, error)
 	RemoveDealParticipant(ctx context.Context, dealID, userID string) (*pb.Deal, error)
 	RemovePurchase(ctx context.Context, dealID, purchaseID string) (*pb.Deal, error)
 	CalculateDebts(ctx context.Context, dealID string) (*pb.CalculateDebtsResponse, error)
+	AddPayment(ctx context.Context, dealID, fromUserID, toUserID string, amount int64) (*pb.Payment, error)
+	ListDealPayments(ctx context.Context, dealID string) ([]*pb.Payment, error)
+	RemovePayment(ctx context.Context, paymentID string) error
 }
 
 type Client struct {
@@ -134,14 +137,16 @@ func (c *Client) RemoveDealCoverage(ctx context.Context, dealID, coveredID strin
 	return resp.Deal, nil
 }
 
-func (c *Client) AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string) (*pb.Purchase, error) {
+func (c *Client) AddPurchase(ctx context.Context, dealID, title string, amount int64, paidBy, splitMode string, participantIDs []string, payerShare int64, participantAmounts map[string]int64) (*pb.Purchase, error) {
 	resp, err := c.conn.AddPurchase(ctx, &pb.AddPurchaseRequest{
-		DealId:         dealID,
-		Title:          title,
-		Amount:         amount,
-		PaidBy:         paidBy,
-		SplitMode:      splitMode,
-		ParticipantIds: participantIDs,
+		DealId:             dealID,
+		Title:              title,
+		Amount:             amount,
+		PaidBy:             paidBy,
+		SplitMode:          splitMode,
+		ParticipantIds:     participantIDs,
+		PayerShare:         payerShare,
+		ParticipantAmounts: participantAmounts,
 	})
 	if err != nil {
 		return nil, err
@@ -181,4 +186,30 @@ func (c *Client) RemovePurchase(ctx context.Context, dealID, purchaseID string) 
 
 func (c *Client) CalculateDebts(ctx context.Context, dealID string) (*pb.CalculateDebtsResponse, error) {
 	return c.conn.CalculateDebts(ctx, &pb.CalculateDebtsRequest{DealId: dealID})
+}
+
+func (c *Client) AddPayment(ctx context.Context, dealID, fromUserID, toUserID string, amount int64) (*pb.Payment, error) {
+	resp, err := c.conn.AddPayment(ctx, &pb.AddPaymentRequest{
+		DealId:     dealID,
+		FromUserId: fromUserID,
+		ToUserId:   toUserID,
+		Amount:     amount,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Payment, nil
+}
+
+func (c *Client) ListDealPayments(ctx context.Context, dealID string) ([]*pb.Payment, error) {
+	resp, err := c.conn.ListDealPayments(ctx, &pb.ListDealPaymentsRequest{DealId: dealID})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Payments, nil
+}
+
+func (c *Client) RemovePayment(ctx context.Context, paymentID string) error {
+	_, err := c.conn.RemovePayment(ctx, &pb.RemovePaymentRequest{PaymentId: paymentID})
+	return err
 }

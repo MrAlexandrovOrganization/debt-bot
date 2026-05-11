@@ -1,26 +1,23 @@
 DOCKER_COMPOSE = docker compose
 PROTO_DIR      = proto
-BACKEND_GEN    = src/backend/gen
-FRONTEND_GEN   = src/frontend/telegram/gen
+
+.PHONY: install
+install:
+	go install github.com/bufbuild/buf/cmd/buf@v1.67.0
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
 .PHONY: proto
 proto:
-	protoc \
-		--proto_path=$(PROTO_DIR) \
-		--go_out=$(BACKEND_GEN) \
-		--go_opt=paths=source_relative \
-		--go-grpc_out=$(BACKEND_GEN) \
-		--go-grpc_opt=paths=source_relative \
-		$(PROTO_DIR)/debt/v1/debt.proto
-	protoc \
-		--proto_path=$(PROTO_DIR) \
-		--go_out=$(FRONTEND_GEN) \
-		"--go_opt=Mdebt/v1/debt.proto=github.com/mrralexandrov/debt-bot/frontend/telegram/gen/debt/v1;debtv1" \
-		--go_opt=paths=source_relative \
-		--go-grpc_out=$(FRONTEND_GEN) \
-		"--go-grpc_opt=Mdebt/v1/debt.proto=github.com/mrralexandrov/debt-bot/frontend/telegram/gen/debt/v1;debtv1" \
-		--go-grpc_opt=paths=source_relative \
-		$(PROTO_DIR)/debt/v1/debt.proto
+	buf generate proto
+
+.PHONY: proto-lint
+proto-lint:
+	cd $(PROTO_DIR) && buf lint
+
+.PHONY: format
+format:
+	gofmt -w ./src/backend/ ./src/frontend/telegram/
 
 .PHONY: build
 build:

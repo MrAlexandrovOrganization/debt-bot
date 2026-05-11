@@ -16,7 +16,7 @@ func TestCalculateBalances_ExampleFromSpec(t *testing.T) {
 		{PaidBy: "lyosha", Amount: 500, SplitMode: domain.SplitModeAll},
 	}
 
-	balances := calculateBalances(purchases, participants, nil)
+	balances, _ := calculateBalances(purchases, participants, nil, nil)
 
 	// Per-purchase integer division (remainder stays with payer):
 	// 12500/6=2083 rem2, 8300/6=1383 rem2, 500/6=83 rem2
@@ -83,7 +83,7 @@ func TestCalculateBalances_CustomSplit(t *testing.T) {
 			ParticipantIDs: []string{"alice", "bob"}, // carol is excluded
 		},
 	}
-	balances := calculateBalances(purchases, participants, nil)
+	balances, _ := calculateBalances(purchases, participants, nil, nil)
 	// alice and bob each owe 100, alice paid 200 -> alice net +100
 	// carol owes nothing for this purchase
 	if balances["alice"] != 100 {
@@ -105,7 +105,7 @@ func TestCalculateBalances_WithCoverage(t *testing.T) {
 	}
 	coverages := []domain.Coverage{{PayerID: "alice", CoveredID: "carol"}}
 
-	balances := calculateBalances(purchases, participants, coverages)
+	balances, _ := calculateBalances(purchases, participants, coverages, nil)
 
 	// 300 / 3 = 100 each
 	// alice is charged for herself (−100) AND for carol (−100) → net = 200 − 300 = −200? No:
@@ -125,7 +125,7 @@ func TestCalculateBalances_WithCoverage(t *testing.T) {
 
 func TestCalculateBalances_NoPurchases(t *testing.T) {
 	participants := []string{"alice", "bob"}
-	balances := calculateBalances(nil, participants, nil)
+	balances, _ := calculateBalances(nil, participants, nil, nil)
 	for _, uid := range participants {
 		if balances[uid] != 0 {
 			t.Errorf("balance[%s] = %d, want 0", uid, balances[uid])
