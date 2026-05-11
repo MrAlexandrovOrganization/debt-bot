@@ -9,15 +9,16 @@ install:
 
 .PHONY: proto
 proto:
-	buf generate proto
+	buf generate
 
 .PHONY: proto-lint
 proto-lint:
-	cd $(PROTO_DIR) && buf lint
+	buf lint
 
 .PHONY: format
 format:
-	gofmt -w ./src/backend/ ./src/frontend/telegram/
+	@test -z "$$(gofmt -l ./src/backend/ ./src/frontend/telegram/)" || \
+		(echo "❌ Unformatted files:"; gofmt -l ./src/backend/ ./src/frontend/telegram/; exit 1)
 
 .PHONY: build
 build:
