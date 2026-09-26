@@ -3,18 +3,23 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/mralexandrov/debt-bot/frontend/telegram/internal/bot"
 	observability "github.com/mralexandrov/go-observability"
+	"github.com/mymmrac/telego"
 )
 
 func main() {
 	token := mustEnv("TELEGRAM_BOT_TOKEN")
 	backendAddr := envOr("BACKEND_ADDR", "backend:50051")
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	logger := observability.NewLogger("frontend")
 	slog.SetDefault(logger)
@@ -28,7 +33,11 @@ func main() {
 		slog.ErrorContext(ctx, "setup observability", "error", err)
 		os.Exit(1)
 	}
-	defer shutdown(ctx)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		shutdown(shutdownCtx)
+	}()
 
 	client, err := bot.NewClient(backendAddr)
 	if err != nil {
@@ -36,16 +45,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	api, err := tgbotapi.NewBotAPI(token)
+	api, err := telego.NewBot(token,
+		telego.WithHTTPClient(&http.Client{Timeout: 70 * time.Second}),
+		telego.WithLogger(bot.TelegramLogger{}),
+	)
 	if err != nil {
-		slog.ErrorContext(ctx, "create telegram bot", "error", err)
+		slog.ErrorContext(ctx, "create telegram bot failed")
 		os.Exit(1)
 	}
 
-	slog.InfoContext(ctx, "authorized on account", "username", api.Self.UserName)
+	me, err := api.GetMe(ctx)
+	if err != nil {
+		slog.ErrorContext(ctx, "telegram authorization failed")
+		os.Exit(1)
+	}
+	slog.InfoContext(ctx, "authorized on account", "username", me.Username)
 
 	handler := bot.NewHandler(api, client)
-	if err := handler.Run(); err != nil {
+	if err := handler.Run(ctx); err != nil {
 		slog.ErrorContext(ctx, "run bot", "error", err)
 		os.Exit(1)
 	}

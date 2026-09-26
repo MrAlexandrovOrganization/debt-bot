@@ -6,8 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	pb "github.com/mralexandrov/debt-bot/frontend/telegram/gen/debt/v1"
+	"github.com/mymmrac/telego"
+	tu "github.com/mymmrac/telego/telegoutil"
 	"go.opentelemetry.io/otel/attribute"
 )
 
@@ -87,12 +88,12 @@ type userState struct {
 }
 
 type Handler struct {
-	api    *tgbotapi.BotAPI
+	api    *telego.Bot
 	client DebtClient
 	sm     StateManager
 }
 
-func NewHandler(api *tgbotapi.BotAPI, client DebtClient) *Handler {
+func NewHandler(api *telego.Bot, client DebtClient) *Handler {
 	return &Handler{
 		api:    api,
 		client: client,
@@ -100,42 +101,63 @@ func NewHandler(api *tgbotapi.BotAPI, client DebtClient) *Handler {
 	}
 }
 
-func (h *Handler) Run() error {
-	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
-	updates := h.api.GetUpdatesChan(u)
+func (h *Handler) Run(ctx context.Context) error {
+	updates, err := h.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
+		Timeout:        60,
+		AllowedUpdates: []string{"message", "callback_query"},
+	})
+	if err != nil {
+		return err
+	}
 	for update := range updates {
+		if ctx.Err() != nil {
+			break
+		}
 		if update.CallbackQuery != nil {
-			h.dispatchCallback(update.CallbackQuery)
+			h.dispatchCallback(ctx, update.CallbackQuery)
 		} else if update.Message != nil {
-			h.dispatchMessage(update.Message)
+			h.dispatchMessage(ctx, update.Message)
 		}
 	}
 	return nil
 }
 
-func (h *Handler) dispatchMessage(msg *tgbotapi.Message) {
-	ctx, span := tracer.Start(context.Background(), "tg.message")
+func (h *Handler) dispatchMessage(ctx context.Context, msg *telego.Message) {
+	if msg.From == nil {
+		return
+	}
+	ctx, span := tracer.Start(ctx, "tg.message")
 	defer span.End()
 	span.SetAttributes(
 		attribute.Int64("tg.user_id", msg.From.ID),
 		attribute.Int64("tg.chat_id", msg.Chat.ID),
 	)
-	if msg.IsCommand() {
-		span.SetAttributes(attribute.String("tg.command", msg.Command()))
+	if command := messageCommand(msg); command != "" {
+		span.SetAttributes(attribute.String("tg.command", command))
 	}
 	h.handleMessage(ctx, msg)
 }
 
-func (h *Handler) dispatchCallback(cb *tgbotapi.CallbackQuery) {
-	ctx, span := tracer.Start(context.Background(), "tg.callback")
+func (h *Handler) dispatchCallback(ctx context.Context, cb *telego.CallbackQuery) {
+	ctx, span := tracer.Start(ctx, "tg.callback")
 	defer span.End()
 	span.SetAttributes(
 		attribute.Int64("tg.user_id", cb.From.ID),
-		attribute.Int64("tg.chat_id", cb.Message.Chat.ID),
 		attribute.String("tg.callback_data", cb.Data),
 	)
+	if cb.Message != nil {
+		span.SetAttributes(attribute.Int64("tg.chat_id", cb.Message.GetChat().ID))
+	}
 	h.handleCallback(ctx, cb)
+}
+
+// Commands must be Telegram bot_command entities at the start of the message.
+func messageCommand(msg *telego.Message) string {
+	if len(msg.Entities) == 0 || msg.Entities[0].Type != "bot_command" || msg.Entities[0].Offset != 0 {
+		return ""
+	}
+	command, _, _ := tu.ParseCommand(msg.Text)
+	return command
 }
 
 // --- Navigation helpers ---
@@ -159,9 +181,9 @@ func (h *Handler) showMainMenu(ctx context.Context, chatID int64, msgID int, tex
 	ctx, span := tracer.Start(ctx, "showMainMenu")
 	defer span.End()
 
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📋 Мои сделки", "my_deals"),
+	kb := *tu.InlineKeyboard(
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("📋 Мои сделки").WithCallbackData("my_deals"),
 		),
 	)
 	sendOrEdit(ctx, h.api, chatID, msgID, text, &kb)
@@ -177,7 +199,7 @@ func (h *Handler) showDealsList(ctx context.Context, chatID int64, msgID int, us
 		return
 	}
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 
 	text := "Ваши сделки:"
 	if len(deals) == 0 {
@@ -185,15 +207,15 @@ func (h *Handler) showDealsList(ctx context.Context, chatID int64, msgID int, us
 	}
 	for _, d := range deals {
 		label := fmt.Sprintf("📦 %s (%d чел.)", d.Title, len(d.ParticipantIds))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(label, "deal:"+d.Id),
+		rows = append(rows, tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton(label).WithCallbackData("deal:"+d.Id),
 		))
 	}
 	rows = append(rows,
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("➕ Создать сделку", "new_deal")),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Назад", "main_menu")),
+		tu.InlineKeyboardRow(tu.InlineKeyboardButton("➕ Создать сделку").WithCallbackData("new_deal")),
+		tu.InlineKeyboardRow(tu.InlineKeyboardButton("← Назад").WithCallbackData("main_menu")),
 	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, text, &kb)
 }
 
@@ -212,20 +234,20 @@ func (h *Handler) showDealMenu(ctx context.Context, chatID int64, msgID int, dea
 		covLabel = fmt.Sprintf("👥 Покрытие (%d)", covCount)
 	}
 	text := fmt.Sprintf("📦 %s\nУчастников: %d", deal.Title, len(deal.ParticipantIds))
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("👤 Участники", "participants:"+dealID),
-			tgbotapi.NewInlineKeyboardButtonData("🛍 Покупки", "purchases:"+dealID),
+	kb := *tu.InlineKeyboard(
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("👤 Участники").WithCallbackData("participants:"+dealID),
+			tu.InlineKeyboardButton("🛍 Покупки").WithCallbackData("purchases:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Рассчитать", "calculate:"+dealID),
-			tgbotapi.NewInlineKeyboardButtonData(covLabel, "deal_coverages:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("💰 Рассчитать").WithCallbackData("calculate:"+dealID),
+			tu.InlineKeyboardButton(covLabel).WithCallbackData("deal_coverages:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💸 Платежи", "payments:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("💸 Платежи").WithCallbackData("payments:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("← К сделкам", "my_deals"),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("← К сделкам").WithCallbackData("my_deals"),
 		),
 	)
 	sendOrEdit(ctx, h.api, chatID, msgID, text, &kb)
@@ -246,7 +268,7 @@ func (h *Handler) showDealCoverageMenu(ctx context.Context, chatID int64, msgID 
 	sb.WriteString("👥 Покрытие расходов\n")
 	sb.WriteString("(кто платит за кого во всех покупках сделки)\n")
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 
 	if len(deal.Coverages) == 0 {
 		sb.WriteString("\nПокрытий нет.")
@@ -257,22 +279,22 @@ func (h *Handler) showDealCoverageMenu(ctx context.Context, chatID int64, msgID 
 			covered := resolveUserName(ctx, h.client, cov.CoveredId, names)
 			fmt.Fprintf(&sb, "• %s платит за %s\n", payer, covered)
 			removeLabel := fmt.Sprintf("❌ %s→%s", payer, covered)
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			rows = append(rows, tu.InlineKeyboardRow(
 				// "deal_cov_remove:{coveredID}" → 16+36=52 chars ✓
-				tgbotapi.NewInlineKeyboardButtonData(removeLabel, "deal_cov_remove:"+cov.CoveredId),
+				tu.InlineKeyboardButton(removeLabel).WithCallbackData("deal_cov_remove:"+cov.CoveredId),
 			))
 		}
 	}
 
 	rows = append(rows,
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить покрытие", "deal_cov_add"),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("➕ Добавить покрытие").WithCallbackData("deal_cov_add"),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("← Назад").WithCallbackData("deal:"+dealID),
 		),
 	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &kb)
 }
 
@@ -280,17 +302,17 @@ func (h *Handler) showDealCovPayerKeyboard(ctx context.Context, chatID int64, ms
 	ctx, span := tracer.Start(ctx, "showDealCovPayerKeyboard")
 	defer span.End()
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	for _, p := range participants {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		rows = append(rows, tu.InlineKeyboardRow(
 			// "deal_cov_payer:{payerID}" → 15+36=51 chars ✓
-			tgbotapi.NewInlineKeyboardButtonData(p.Name, "deal_cov_payer:"+p.Id),
+			tu.InlineKeyboardButton(p.Name).WithCallbackData("deal_cov_payer:"+p.Id),
 		))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal_cov_back"),
+	rows = append(rows, tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("← Назад").WithCallbackData("deal_cov_back"),
 	))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, "Кто платит за другого?", &kb)
 }
 
@@ -299,20 +321,20 @@ func (h *Handler) showDealCovCoveredKeyboard(ctx context.Context, chatID int64, 
 	defer span.End()
 
 	payerName := st.participantNames[st.pendingCovPayerID]
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	for id, name := range st.participantNames {
 		if id == st.pendingCovPayerID {
 			continue
 		}
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		rows = append(rows, tu.InlineKeyboardRow(
 			// "deal_cov_covered:{coveredID}" → 17+36=53 chars ✓
-			tgbotapi.NewInlineKeyboardButtonData(name, "deal_cov_covered:"+id),
+			tu.InlineKeyboardButton(name).WithCallbackData("deal_cov_covered:"+id),
 		))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal_cov_add"),
+	rows = append(rows, tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("← Назад").WithCallbackData("deal_cov_add"),
 	))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, fmt.Sprintf("За кого платит %s?", payerName), &kb)
 }
 
@@ -326,7 +348,7 @@ func (h *Handler) showParticipants(ctx context.Context, chatID int64, msgID int,
 		return
 	}
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 
 	text := "👤 Участники сделки:\n\nУчастников пока нет."
 	if len(deal.ParticipantIds) > 0 {
@@ -338,22 +360,22 @@ func (h *Handler) showParticipants(ctx context.Context, chatID int64, msgID int,
 		text = "👤 Участники сделки:"
 		for _, u := range users {
 			// "del_participant:{userID}" → 17+36=53 chars ✓
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData(u.Name, "noop"),
-				tgbotapi.NewInlineKeyboardButtonData("❌", "del_participant:"+u.Id),
+			rows = append(rows, tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton(u.Name).WithCallbackData("noop"),
+				tu.InlineKeyboardButton("❌").WithCallbackData("del_participant:"+u.Id),
 			))
 		}
 	}
 
 	rows = append(rows,
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить участника", "add_participant:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("➕ Добавить участника").WithCallbackData("add_participant:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("← Назад").WithCallbackData("deal:"+dealID),
 		),
 	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, text, &kb)
 }
 
@@ -367,12 +389,12 @@ func (h *Handler) showPurchases(ctx context.Context, chatID int64, msgID int, de
 		return
 	}
 
-	bottomKb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить покупку", "add_purchase:"+dealID),
+	bottomKb := *tu.InlineKeyboard(
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("➕ Добавить покупку").WithCallbackData("add_purchase:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("← Назад").WithCallbackData("deal:"+dealID),
 		),
 	)
 
@@ -385,21 +407,21 @@ func (h *Handler) showPurchases(ctx context.Context, chatID int64, msgID int, de
 	var sb strings.Builder
 	sb.WriteString("🛍 Покупки:\n\n")
 	var total int64
-	var purchaseRows [][]tgbotapi.InlineKeyboardButton
+	var purchaseRows [][]telego.InlineKeyboardButton
 	for _, p := range purchases {
 		payerName := resolveUserName(ctx, h.client, p.PaidBy, names)
 		fmt.Fprintf(&sb, "• %s — %s ₽ (платил %s)\n", p.Title, formatAmount(p.Amount), payerName)
 		total += p.Amount
 		// "del_purchase:{purchaseID}" → 13+36=49 chars ✓
-		purchaseRows = append(purchaseRows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("❌ "+p.Title, "del_purchase:"+p.Id),
+		purchaseRows = append(purchaseRows, tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("❌ "+p.Title).WithCallbackData("del_purchase:"+p.Id),
 		))
 	}
 	fmt.Fprintf(&sb, "\nИтого: %s ₽", formatAmount(total))
 
 	// Merge: delete buttons per purchase + bottom action buttons
 	allRows := append(purchaseRows, bottomKb.InlineKeyboard...)
-	fullKb := tgbotapi.NewInlineKeyboardMarkup(allRows...)
+	fullKb := *tu.InlineKeyboard(allRows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &fullKb)
 }
 
@@ -413,8 +435,8 @@ func (h *Handler) showCalculation(ctx context.Context, chatID int64, msgID int, 
 		return
 	}
 
-	back := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID)),
+	back := *tu.InlineKeyboard(
+		tu.InlineKeyboardRow(tu.InlineKeyboardButton("← Назад").WithCallbackData("deal:" + dealID)),
 	)
 
 	var sb strings.Builder
@@ -459,7 +481,7 @@ func (h *Handler) showPayments(ctx context.Context, chatID int64, msgID int, dea
 	var sb strings.Builder
 	sb.WriteString("💸 Платежи:\n\n")
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	names := make(map[string]string)
 
 	if len(payments) == 0 {
@@ -469,21 +491,21 @@ func (h *Handler) showPayments(ctx context.Context, chatID int64, msgID int, dea
 			from := resolveUserName(ctx, h.client, p.FromUserId, names)
 			to := resolveUserName(ctx, h.client, p.ToUserId, names)
 			fmt.Fprintf(&sb, "• %s → %s: %s ₽\n", from, to, formatAmount(p.Amount))
-			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("❌ "+from+"→"+to, "del_payment:"+p.Id),
+			rows = append(rows, tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("❌ "+from+"→"+to).WithCallbackData("del_payment:"+p.Id),
 			))
 		}
 	}
 
 	rows = append(rows,
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("➕ Добавить платёж", "add_payment:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("➕ Добавить платёж").WithCallbackData("add_payment:"+dealID),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("← Назад", "deal:"+dealID),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("← Назад").WithCallbackData("deal:"+dealID),
 		),
 	)
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, sb.String(), &kb)
 }
 
@@ -491,16 +513,16 @@ func (h *Handler) showPaymentFromKeyboard(ctx context.Context, chatID int64, msg
 	ctx, span := tracer.Start(ctx, "showPaymentFromKeyboard")
 	defer span.End()
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	for _, p := range participants {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_from:"+p.Id),
+		rows = append(rows, tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton(p.Name).WithCallbackData("payment_from:"+p.Id),
 		))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("← Назад", "back"),
+	rows = append(rows, tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("← Назад").WithCallbackData("back"),
 	))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, "Кто перевёл деньги?", &kb)
 }
 
@@ -508,19 +530,19 @@ func (h *Handler) showPaymentToKeyboard(ctx context.Context, chatID int64, msgID
 	ctx, span := tracer.Start(ctx, "showPaymentToKeyboard")
 	defer span.End()
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	for _, p := range participants {
 		if p.Id == excludeID {
 			continue
 		}
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payment_to:"+p.Id),
+		rows = append(rows, tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton(p.Name).WithCallbackData("payment_to:"+p.Id),
 		))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("← Назад", "back"),
+	rows = append(rows, tu.InlineKeyboardRow(
+		tu.InlineKeyboardButton("← Назад").WithCallbackData("back"),
 	))
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	text := "Кому перевёл?"
 	if len(rows) == 1 {
 		text = "Нет других участников для выбора получателя."
@@ -532,15 +554,15 @@ func (h *Handler) showSplitModeKeyboard(ctx context.Context, chatID int64, msgID
 	ctx, span := tracer.Start(ctx, "showSplitModeKeyboard")
 	defer span.End()
 
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Поровну", "split_mode:all"),
+	kb := *tu.InlineKeyboard(
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("Поровну").WithCallbackData("split_mode:all"),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Поровну — указать мою долю", "split_mode:all_share"),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("Поровну — указать мою долю").WithCallbackData("split_mode:all_share"),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("По суммам каждого", "split_mode:amounts"),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("По суммам каждого").WithCallbackData("split_mode:amounts"),
 		),
 	)
 	sendOrEdit(ctx, h.api, chatID, msgID, "Как разделить расходы?", &kb)
@@ -550,12 +572,12 @@ func (h *Handler) showPayerKeyboard(ctx context.Context, chatID int64, msgID int
 	ctx, span := tracer.Start(ctx, "showPayerKeyboard")
 	defer span.End()
 
-	var rows [][]tgbotapi.InlineKeyboardButton
+	var rows [][]telego.InlineKeyboardButton
 	for _, p := range participants {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(p.Name, "payer:"+p.Id),
+		rows = append(rows, tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton(p.Name).WithCallbackData("payer:"+p.Id),
 		))
 	}
-	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	kb := *tu.InlineKeyboard(rows...)
 	sendOrEdit(ctx, h.api, chatID, msgID, "Кто оплатил?", &kb)
 }

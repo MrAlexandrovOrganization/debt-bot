@@ -1,13 +1,13 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.7-alpine AS builder
 
 RUN apk add --no-cache protobuf && \
-    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest && \
-    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.1
 
 WORKDIR /app
 
-COPY src/frontend/telegram/go.mod ./
-RUN go mod tidy
+COPY src/frontend/telegram/go.mod src/frontend/telegram/go.sum ./
+RUN go mod download
 
 # Generate proto into gen/debt/v1 (with frontend module path)
 COPY proto/ /proto/

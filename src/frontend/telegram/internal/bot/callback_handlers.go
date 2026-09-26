@@ -5,21 +5,27 @@ import (
 	"fmt"
 	"strings"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	pb "github.com/mralexandrov/debt-bot/frontend/telegram/gen/debt/v1"
+	"github.com/mymmrac/telego"
 )
 
 // --- Callback handler (button presses) ---
 
-func (h *Handler) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleCallback(ctx context.Context, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleCallback")
 	defer span.End()
 
+	if err := h.api.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{CallbackQueryID: cb.ID}); err != nil {
+		recordTelegramError(ctx, "answerCallbackQuery", err)
+	}
+	// Inline callbacks and inaccessible messages cannot drive this chat UI.
+	message, ok := cb.Message.(*telego.Message)
+	if !ok || message == nil {
+		return
+	}
 	tgID := cb.From.ID
-	chatID := cb.Message.Chat.ID
-	msgID := cb.Message.MessageID
-
-	h.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	chatID := message.Chat.ID
+	msgID := message.MessageID
 
 	data := cb.Data
 
@@ -89,18 +95,18 @@ func (h *Handler) handleNewDeal(ctx context.Context, tgID, chatID int64, msgID i
 	editText(ctx, h.api, chatID, msgID, "Введите название сделки:", &kb)
 }
 
-func (h *Handler) handleMyDeals(ctx context.Context, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleMyDeals(ctx context.Context, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleMyDeals")
 	defer span.End()
 
-	user := h.resolveUser(ctx, cb.From)
+	user := h.resolveUser(ctx, &cb.From)
 	if user == nil {
 		return
 	}
 	h.showDealsList(ctx, chatID, msgID, user.Id)
 }
 
-func (h *Handler) handleDeal(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDeal(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDeal")
 	defer span.End()
 
@@ -108,7 +114,7 @@ func (h *Handler) handleDeal(ctx context.Context, tgID, chatID int64, msgID int,
 	h.navigateToDeal(ctx, tgID, chatID, msgID, dealID)
 }
 
-func (h *Handler) handleAddParticipant(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleAddParticipant(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleAddParticipant")
 	defer span.End()
 
@@ -120,7 +126,7 @@ func (h *Handler) handleAddParticipant(ctx context.Context, tgID, chatID int64, 
 	editText(ctx, h.api, chatID, msgID, "Добавьте участника одним из способов:\n\n• Введите имя\n• Отправьте @username\n• Перешлите сообщение от участника", &kb)
 }
 
-func (h *Handler) handleAddPurchase(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleAddPurchase(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleAddPurchase")
 	defer span.End()
 
@@ -132,7 +138,7 @@ func (h *Handler) handleAddPurchase(ctx context.Context, tgID, chatID int64, msg
 	editText(ctx, h.api, chatID, msgID, "Введите название покупки:", &kb)
 }
 
-func (h *Handler) handleParticipants(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleParticipants(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleParticipants")
 	defer span.End()
 
@@ -141,7 +147,7 @@ func (h *Handler) handleParticipants(ctx context.Context, tgID, chatID int64, ms
 	h.showParticipants(ctx, chatID, msgID, dealID)
 }
 
-func (h *Handler) handlePurchases(ctx context.Context, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handlePurchases(ctx context.Context, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handlePurchases")
 	defer span.End()
 
@@ -150,12 +156,12 @@ func (h *Handler) handlePurchases(ctx context.Context, chatID int64, msgID int, 
 	h.showPurchases(ctx, chatID, msgID, dealID)
 }
 
-func (h *Handler) handleCalculate(ctx context.Context, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleCalculate(ctx context.Context, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleCalculate")
 	defer span.End()
 
 	dealID := strings.TrimPrefix(cb.Data, "calculate:")
-	user := h.resolveUser(ctx, cb.From)
+	user := h.resolveUser(ctx, &cb.From)
 	var userID string
 	if user != nil {
 		userID = user.Id
@@ -165,7 +171,7 @@ func (h *Handler) handleCalculate(ctx context.Context, chatID int64, msgID int, 
 
 // Deal-level coverages management screen
 // "deal_coverages:{dealID}" → max 15+36=51 chars ✓
-func (h *Handler) handleDealCoverages(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDealCoverages(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDealCoverages")
 	defer span.End()
 
@@ -204,7 +210,7 @@ func (h *Handler) handleDealCoverageAdd(ctx context.Context, tgID, chatID int64,
 }
 
 // Coverage payer selected → "deal_cov_payer:{payerID}" → 15+36=51 chars ✓
-func (h *Handler) handleDealCoveragePayer(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDealCoveragePayer(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDealCoveragePayer")
 	defer span.End()
 
@@ -216,7 +222,7 @@ func (h *Handler) handleDealCoveragePayer(ctx context.Context, tgID, chatID int6
 }
 
 // Covered person selected → "deal_cov_covered:{coveredID}" → 17+36=53 chars ✓
-func (h *Handler) handleDealCoverageCovered(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDealCoverageCovered(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDealCoverageCovered")
 	defer span.End()
 
@@ -251,7 +257,7 @@ func (h *Handler) handleDealCoverageBack(ctx context.Context, tgID, chatID int64
 }
 
 // Remove a coverage → "deal_cov_remove:{coveredID}" → 16+36=52 chars ✓
-func (h *Handler) handleDealCoverageRemove(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDealCoverageRemove(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDealCoverageRemove")
 	defer span.End()
 
@@ -269,7 +275,7 @@ func (h *Handler) handleDealCoverageRemove(ctx context.Context, tgID, chatID int
 }
 
 // Payer selected → show split mode keyboard
-func (h *Handler) handlePayerSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handlePayerSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handlePayerSelected")
 	defer span.End()
 
@@ -285,7 +291,7 @@ func (h *Handler) handlePayerSelected(ctx context.Context, tgID, chatID int64, m
 }
 
 // Split mode selected
-func (h *Handler) handleSplitModeSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleSplitModeSelected(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleSplitModeSelected")
 	defer span.End()
 
@@ -341,7 +347,7 @@ func (h *Handler) handleSplitModeSelected(ctx context.Context, tgID, chatID int6
 }
 
 // Payments screen
-func (h *Handler) handlePayments(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handlePayments(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handlePayments")
 	defer span.End()
 
@@ -351,7 +357,7 @@ func (h *Handler) handlePayments(ctx context.Context, tgID, chatID int64, msgID 
 }
 
 // Start adding a payment: show "from" selector
-func (h *Handler) handleAddPayment(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleAddPayment(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleAddPayment")
 	defer span.End()
 
@@ -377,7 +383,7 @@ func (h *Handler) handleAddPayment(ctx context.Context, tgID, chatID int64, msgI
 }
 
 // Payment "from" selected
-func (h *Handler) handlePaymentFrom(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handlePaymentFrom(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handlePaymentFrom")
 	defer span.End()
 
@@ -395,7 +401,7 @@ func (h *Handler) handlePaymentFrom(ctx context.Context, tgID, chatID int64, msg
 }
 
 // Payment "to" selected
-func (h *Handler) handlePaymentTo(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handlePaymentTo(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handlePaymentTo")
 	defer span.End()
 
@@ -408,7 +414,7 @@ func (h *Handler) handlePaymentTo(ctx context.Context, tgID, chatID int64, msgID
 }
 
 // Delete payment
-func (h *Handler) handleDeletePayment(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDeletePayment(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDeletePayment")
 	defer span.End()
 
@@ -425,7 +431,7 @@ func (h *Handler) handleDeletePayment(ctx context.Context, tgID, chatID int64, m
 	h.showPayments(ctx, chatID, msgID, st.dealID)
 }
 
-func (h *Handler) handleDeleteParticipant(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDeleteParticipant(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDeleteParticipant")
 	defer span.End()
 
@@ -443,7 +449,7 @@ func (h *Handler) handleDeleteParticipant(ctx context.Context, tgID, chatID int6
 	h.showParticipants(ctx, chatID, msgID, st.dealID)
 }
 
-func (h *Handler) handleDeletePurchase(ctx context.Context, tgID, chatID int64, msgID int, cb *tgbotapi.CallbackQuery) {
+func (h *Handler) handleDeletePurchase(ctx context.Context, tgID, chatID int64, msgID int, cb *telego.CallbackQuery) {
 	ctx, span := tracer.Start(ctx, "handleDeletePurchase")
 	defer span.End()
 

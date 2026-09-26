@@ -17,8 +17,14 @@ proto-lint:
 
 .PHONY: format
 format:
+	gofmt -w ./src/backend/ ./src/frontend/telegram/
+
+.PHONY: check
+check: test
 	@test -z "$$(gofmt -l ./src/backend/ ./src/frontend/telegram/)" || \
 		(echo "❌ Unformatted files:"; gofmt -l ./src/backend/ ./src/frontend/telegram/; exit 1)
+	cd src/backend && go vet ./...
+	cd src/frontend/telegram && go vet ./...
 
 .PHONY: build
 build:
@@ -43,6 +49,7 @@ migrate:
 .PHONY: test
 test:
 	cd src/backend && go test ./...
+	cd src/frontend/telegram && go test ./...
 
 .PHONY: coverage
 coverage:

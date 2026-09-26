@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	pb "github.com/mralexandrov/debt-bot/frontend/telegram/gen/debt/v1"
+	"github.com/mymmrac/telego"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -16,7 +16,7 @@ var tracer = otel.Tracer("debt-bot-frontend")
 
 // --- User helpers (Handler methods) ---
 
-func (h *Handler) resolveUser(ctx context.Context, from *tgbotapi.User) *pb.User {
+func (h *Handler) resolveUser(ctx context.Context, from *telego.User) *pb.User {
 	ctx, span := tracer.Start(ctx, "resolveUser")
 	defer span.End()
 
@@ -24,9 +24,9 @@ func (h *Handler) resolveUser(ctx context.Context, from *tgbotapi.User) *pb.User
 
 	name := strings.TrimSpace(from.FirstName + " " + from.LastName)
 	if name == "" {
-		name = from.UserName
+		name = from.Username
 	}
-	user, _, err := h.client.ResolveOrCreateUser(ctx, platform, strconv.FormatInt(from.ID, 10), name, from.UserName)
+	user, _, err := h.client.ResolveOrCreateUser(ctx, platform, strconv.FormatInt(from.ID, 10), name, from.Username)
 	if err != nil {
 		slog.ErrorContext(ctx, "resolveOrCreateUser failed", "tg_user_id", from.ID, "error", err)
 		return nil
@@ -36,25 +36,25 @@ func (h *Handler) resolveUser(ctx context.Context, from *tgbotapi.User) *pb.User
 }
 
 // resolveParticipant determines how to add a participant based on the message:
-//   - Forwarded message (ForwardFrom set)  → link by Telegram ID
-//   - Privacy-protected forward (ForwardSenderName) → plain name
+//   - Forwarded message (MessageOriginUser) → link by Telegram ID
+//   - Privacy-protected forward (MessageOriginHiddenUser) → plain name
 //   - @username text                        → link by username (merge on first bot use)
 //   - Plain text                            → name only
 //
 // Returns the created/found user, an optional notice string, and an error.
-func (h *Handler) resolveParticipant(ctx context.Context, msg *tgbotapi.Message) (*pb.User, string, error) {
+func (h *Handler) resolveParticipant(ctx context.Context, msg *telego.Message) (*pb.User, string, error) {
 	ctx, span := tracer.Start(ctx, "resolveParticipant")
 	defer span.End()
 
 	// Case 1: forwarded message with public sender info
-	if msg.ForwardFrom != nil {
-		from := msg.ForwardFrom
+	if origin, ok := msg.ForwardOrigin.(*telego.MessageOriginUser); ok {
+		from := origin.SenderUser
 		span.SetAttributes(attribute.String("resolve.method", "forward_public"))
 		name := strings.TrimSpace(from.FirstName + " " + from.LastName)
 		if name == "" {
-			name = from.UserName
+			name = from.Username
 		}
-		user, _, err := h.client.ResolveOrCreateUser(ctx, platform, strconv.FormatInt(from.ID, 10), name, from.UserName)
+		user, _, err := h.client.ResolveOrCreateUser(ctx, platform, strconv.FormatInt(from.ID, 10), name, from.Username)
 		if err != nil {
 			slog.ErrorContext(ctx, "resolveParticipant: forward public failed", "error", err)
 			return nil, "", err
@@ -64,9 +64,9 @@ func (h *Handler) resolveParticipant(ctx context.Context, msg *tgbotapi.Message)
 	}
 
 	// Case 2: forwarded message but sender hid their identity
-	if msg.ForwardSenderName != "" {
+	if origin, ok := msg.ForwardOrigin.(*telego.MessageOriginHiddenUser); ok {
 		span.SetAttributes(attribute.String("resolve.method", "forward_private"))
-		user, err := h.client.CreateUser(ctx, msg.ForwardSenderName)
+		user, err := h.client.CreateUser(ctx, origin.SenderUserName)
 		if err != nil {
 			slog.ErrorContext(ctx, "resolveParticipant: forward private failed", "error", err)
 			return nil, "", err

@@ -5,19 +5,19 @@ import (
 	"fmt"
 	"strings"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/mymmrac/telego"
 	"go.opentelemetry.io/otel/attribute"
 )
 
 // --- Message handler (text input) ---
 
-func (h *Handler) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
+func (h *Handler) handleMessage(ctx context.Context, msg *telego.Message) {
 	ctx, span := tracer.Start(ctx, "handleMessage")
 	defer span.End()
 
 	tgID := msg.From.ID
 
-	if msg.IsCommand() && msg.Command() == "start" {
+	if messageCommand(msg) == "start" {
 		h.sm.Reset(tgID)
 		user := h.resolveUser(ctx, msg.From)
 		greeting := "Привет!"
