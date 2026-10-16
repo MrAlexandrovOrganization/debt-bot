@@ -54,3 +54,10 @@ go run ./cmd/bot
 
 CI проверяет PR и push в `main`. После успешных проверок push в `main`
 запускает SSH-деплой в `VM_PROJECT_PATH` с `git pull` и `make up`.
+
+## Container names
+
+Compose uses explicit service names without replica numbers. Set
+`CONTAINER_NAME_PREFIX` (for example `dev-`) for an additional local or CI stack
+on the same Docker host. Keep Compose project/service labels and volume names
+unchanged; clients address services or explicit network aliases.
